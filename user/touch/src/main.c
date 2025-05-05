@@ -23,9 +23,7 @@ void usage(FILE* sink, const char* exe) {
 intptr_t touch(const char* filename) {
     Stats stats;
 
-    intptr_t result = stat(filename, &stats);
-
-    if (result >= 0) {
+    if (stat(filename, &stats) >= 0) {
         fprintf(stderr, "File already exists.\n");
         return 0;
     }
