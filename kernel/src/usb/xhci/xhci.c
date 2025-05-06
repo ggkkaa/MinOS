@@ -3,6 +3,7 @@
 #include <iomem.h>
 #include <page.h>
 #include <memory.h>
+#include <ptr_darray.h>
 typedef struct {
     uint8_t  caplen;
     uint8_t  _reserved;
@@ -283,36 +284,23 @@ uint8_t get_next_in_dwords(const volatile ExtCapEntry* entry) {
 }
 
 typedef struct XhciController XhciController;
-typedef struct {
-    XhciController** data;
-    size_t len, cap;
-} XhciControllers;
-XhciControllers xhci_controllers = {0};
+typedef PtrDarray XhciControllers;
+static XhciControllers xhci_controllers = {0};
 static Cache* xhci_controller_cache=NULL;
 
-bool xhci_controllers_reserve(XhciControllers* da, size_t extra) {
-    if(da->len + extra > da->cap) {
-        size_t new_cap = da->cap*2 + extra;
-        void* new_data = kernel_malloc(new_cap * sizeof(da->data[0]));
-        if(!new_data) return false;
-        kernel_dealloc(da->data, da->cap * sizeof(da->data[0]));
-        da->cap = new_cap;
-        da->data = new_data;
-    }
-    return true;
-}
 static inline bool xhci_controllers_add(XhciControllers* da, XhciController* controller) {
-    if(!xhci_controllers_reserve(da, 1)) return false;
-    da->data[da->len++] = controller;
+    if(!ptr_darray_reserve(da, 1)) return false;
+    da->items[da->len++] = controller;
     return true;
 }
 static inline XhciController* xhci_controllers_pop(XhciControllers* da) {
     assert(da->len);
-    return da->data[--da->len];
+    return da->items[--da->len];
 }
 typedef struct {
     uint8_t revision_major, revision_minor, slot_id;
 } Port;
+
 struct XhciController {
     volatile CapabilityRegs* capregs;
     Port* ports_items;
@@ -665,7 +653,7 @@ intptr_t init_xhci(PciDevice* dev) {
     irs->erst_size = (irs->erst_size & ~0xFFFF) | 1;
     irs->erst_addr = cont->erst_phys;
     irs->event_ring_dequeue_ptr = cont->event_ring_phys | EVENT_HANDLER_BUSY;
-    irs->iman = irs->iman | IMAN_PENDING | IMAN_ENABLED;
+    irs->iman = irs->iman /*| IMAN_PENDING*/ | IMAN_ENABLED;
     xhci_op_regs(cont)->usb_cmd = xhci_op_regs(cont)->usb_cmd | USBCMD_INT_ENABLE;
 
     dev->handler = xhci_handler; 
@@ -674,26 +662,14 @@ intptr_t init_xhci(PciDevice* dev) {
     // irq_clear(dev->irq);
     kinfo("xHCI Running");
     xhci_op_regs(cont)->usb_cmd = xhci_op_regs(cont)->usb_cmd | USBCMD_RUN;
-
     for(size_t i = 0; i < cont->ports_count; ++i) {
         volatile PortRegisterSet* reg = &xhci_op_regs(cont)->port_regs[i];
         if(!(reg->status_control & STATUS_CONTROL_POWER)) {
             kinfo("Skipping %zu", i);
             continue;
         }
-        // kinfo("Resetting %zu", i);
         reg->status_control = /* STATUS_CONTROL_RESET_CHANGED | */ STATUS_CONTROL_POWER | STATUS_CONTROL_CONNECT_STATUS_CHANGE;
-        // reg->status_control = /*STATUS_CONTROL_RESET |*/ STATUS_CONTROL_POWER | STATUS_CONTROL_CONNECT_STATUS_CHANGE;
     }
-#if 1
-    volatile TRB* trb;
-    for(size_t i = 0; i < 2; ++i) {
-        trb = xhci_trb_head(cont);
-        trb->type = TRB_TYPE_NOOP;
-        trb->cycle = cont->cmd_ring_cycle;
-        xhci_trb_commit(cont);
-    }
-#endif
     // NOTE: FLADJ is not set. Done by the BIOS? Could be an issue in the future.
     return 0;
 enum_ext_cap_err:
