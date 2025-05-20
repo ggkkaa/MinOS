@@ -20,16 +20,31 @@ static void chrtty_putchar(Tty* device, uint32_t code) {
         return;
     }
 }
+static bool chrtty_is_readable(Inode* device) {
+    return inode_is_readable((Inode*)(((Tty*)device)->priv));
+}
+static bool chrtty_is_writeable(Inode* device) {
+    return inode_is_writeable((Inode*)(((Tty*)device)->priv));
+}
 static intptr_t chrtty_deinit(Tty* device) {
     idrop(device->priv);
     device->priv = NULL;
     return 0;
 }
+static InodeOps inodeOps = {
+    .write = tty_write,
+    .read  = tty_read,
+    .is_readable = chrtty_is_readable,
+    .is_writeable = chrtty_is_writeable,
+    .ioctl = tty_ioctl,
+};
 Tty* chrtty_new(Inode* inode) {
     Tty* device = tty_new();
     device->priv = inode;
     device->getchar = chrtty_getchar;
     device->putchar = chrtty_putchar;
     device->deinit = chrtty_deinit;
+    tty_init(device, tty_cache);
+    device->inode.ops = &inodeOps;
     return device;
 }

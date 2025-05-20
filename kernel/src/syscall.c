@@ -42,6 +42,7 @@ intptr_t sys_open(const char* path, fmode_t mode, oflags_t flags) {
     if((e=parse_path(current, &p, path)) < 0) return e;
     Resource* resource = resource_add(current->resources, &id);
     if(!resource) return -NOT_ENOUGH_MEM;
+    resource->flags = flags;
     Inode* inode;
     if((e=vfs_find(&p, &inode)) < 0) {
         if(e == -NOT_FOUND && flags & O_CREAT) {
@@ -59,9 +60,8 @@ found:
         resource_remove(current->resources, id);
         return e;
     }
-    resource->kind = RESOURCE_INODE;
-    resource->as.inode.inode = inode;
-    resource->as.inode.offset = 0;
+    resource->inode = inode;
+    resource->offset = 0;
     return id;
 }
 intptr_t sys_write(uintptr_t handle, const void* buf, size_t size) {
@@ -71,11 +71,24 @@ intptr_t sys_write(uintptr_t handle, const void* buf, size_t size) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, handle);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
     intptr_t e;
-    if((e=inode_write(res->as.inode.inode, buf, size, res->as.inode.offset)) < 0) return e;
-    res->as.inode.offset += e;
+    if((e=inode_write(res->inode, buf, size, res->offset)) < 0) return e;
+    res->offset += e;
     return e;
+}
+
+intptr_t sys_get_dir_entries(uintptr_t handle, void* buf, size_t size) {
+#ifdef CONFIG_LOG_SYSCALLS
+    strace("sys_get_dir_entries(%lu, %p, %zu)", handle, buf, size);
+#endif
+    Process* current = current_process();
+    Resource* res = resource_find_by_id(current->resources, handle);
+    if(!res) return -INVALID_HANDLE;
+    intptr_t e;
+    size_t read_bytes;
+    if((e=inode_get_dir_entries(res->inode, buf, size, res->offset, &read_bytes)) < 0) return e;
+    res->offset += e;
+    return read_bytes;
 }
 intptr_t sys_read(uintptr_t handle, void* buf, size_t size) {
 #ifdef CONFIG_LOG_SYSCALLS
@@ -84,31 +97,12 @@ intptr_t sys_read(uintptr_t handle, void* buf, size_t size) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, handle);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) {
-        return -INVALID_TYPE;
-    }
     intptr_t e;
-    // TODO: its now redily apparent that we should have a separate syscall for
-    // get_dir_entries
-    switch(res->as.inode.inode->kind) {
-    case INODE_DEVICE:
-    case INODE_FILE:
-        if((e=inode_read(res->as.inode.inode, buf, size, res->as.inode.offset)) < 0) {
-            return e;
-        }
-        res->as.inode.offset += e;
-        return e;
-    case INODE_DIR: {
-        size_t read_bytes;
-        if((e=inode_get_dir_entries(res->as.inode.inode, buf, size, res->as.inode.offset, &read_bytes)) < 0) {
-            return e;
-        }
-        res->as.inode.offset += e;
-        return read_bytes;
-    } break;
-    default:
-        return -INVALID_TYPE;
-    }
+
+    if(!(res->flags & O_NOBLOCK) && !inode_is_readable(res->inode)) block_is_readable(current_task(), res->inode);
+    if((e=inode_read(res->inode, buf, size, res->offset)) < 0) return e;
+    res->offset += e;
+    return e;
 }
 
 intptr_t sys_ioctl(uintptr_t handle, Iop op, void* arg) {
@@ -118,8 +112,7 @@ intptr_t sys_ioctl(uintptr_t handle, Iop op, void* arg) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, handle);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    return inode_ioctl(res->as.inode.inode, op, arg);
+    return inode_ioctl(res->inode, op, arg);
 }
 
 intptr_t sys_mmap(uintptr_t handle, void** addr, size_t size) {
@@ -130,12 +123,11 @@ intptr_t sys_mmap(uintptr_t handle, void** addr, size_t size) {
     Task* task = current_task();
     Resource* res = resource_find_by_id(current->resources, handle);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
     MmapContext context = {
         .page_table = task->image.cr3,
         .memlist = &task->image.memlist
     };
-    intptr_t e = inode_mmap(res->as.inode.inode, &context, addr, size);
+    intptr_t e = inode_mmap(res->inode, &context, addr, size);
     if(e < 0) return e;
     invalidate_pages(*addr, PAGE_ALIGN_UP(size)/PAGE_SIZE);
     return e;
@@ -147,21 +139,20 @@ intptr_t sys_seek(uintptr_t handle, off_t offset, seekfrom_t from) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, handle);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    if(res->as.inode.inode->kind != INODE_FILE) return -INODE_IS_DIRECTORY;
+    if(res->inode->kind != INODE_FILE) return -INODE_IS_DIRECTORY;
     // TODO: Convertions with lba
     switch(from) {
     case SEEK_START:
-        res->as.inode.offset = offset;
-        return res->as.inode.offset;
+        res->offset = offset;
+        return res->offset;
     case SEEK_CURSOR:
-        res->as.inode.offset += offset;
-        return res->as.inode.offset;
+        res->offset += offset;
+        return res->offset;
     case SEEK_EOF: {
         intptr_t e;
-        if((e=inode_size(res->as.inode.inode)) < 0) return e;
-        res->as.inode.offset = e+offset;
-        return res->as.inode.offset;
+        if((e=inode_size(res->inode)) < 0) return e;
+        res->offset = e+offset;
+        return res->offset;
     } break;
     default:
         return -INVALID_PARAM;
@@ -174,9 +165,10 @@ intptr_t sys_tell(uintptr_t handle) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, handle);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    if(res->as.inode.inode->kind != INODE_FILE) return -INODE_IS_DIRECTORY;
-    return res->as.inode.offset;
+    // TODO: Remove this check.
+    // awweqweqw
+    if(res->inode->kind != INODE_FILE) return -INODE_IS_DIRECTORY;
+    return res->offset;
 }
 // TODO: Smarter resource sharing logic. No longer sharing Resource itself but the Inode+offset.
 // The res->shared check is entirely useless
@@ -187,20 +179,9 @@ intptr_t sys_close(uintptr_t handle) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, handle);
     if(!res) return -INVALID_HANDLE;
-    intptr_t e = 0;
-    if(res->shared == 1) {
-        e=0;
-        switch(res->kind) {
-        case RESOURCE_INODE:
-            idrop(res->as.inode.inode);
-            break;
-        case RESOURCE_EPOLL:
-            epoll_destroy(&res->as.epoll);
-            break;
-        }
-    }
+    idrop(res->inode);
     resource_remove(current->resources, handle);
-    return e;
+    return 0;
 }
 intptr_t sys_fork() {
 #ifdef CONFIG_LOG_SYSCALLS
@@ -250,11 +231,9 @@ intptr_t sys_fork() {
     process->curdir_inode = iget(current_proc->curdir_inode);
 
     Task* current = current_task();
-    disable_interrupts();
     Task* task = kernel_task_add();
     if(!task) {
         process_drop(process);
-        enable_interrupts();
         return -LIMITS;
     } 
     process->main_thread = task;
@@ -263,10 +242,8 @@ intptr_t sys_fork() {
     if((e=fork_trampoline(current, task)) < 0) {
         process_drop(process);
         drop_task(task);
-        enable_interrupts();
         return e;
     }
-    enable_interrupts();
     Task* now = current_task();
     if(now->id == task->id) {
         return -YOU_ARE_CHILD;
@@ -281,10 +258,8 @@ intptr_t sys_exec(const char* path, const char** argv, size_t argc, const char**
     Process* cur_proc = current_process();
     Task* cur_task = current_task();
     assert(cur_proc->main_thread == cur_task && "Exec on multiple threads is not supported yet");
-    disable_interrupts();
     Task* task = kernel_task_add();
     if(!task) {
-        enable_interrupts();
         return -LIMITS;
     }
     task->process = cur_proc;
@@ -293,12 +268,10 @@ intptr_t sys_exec(const char* path, const char** argv, size_t argc, const char**
     Path p;
     if((e=parse_path(cur_proc, &p, path)) < 0) {
         drop_task(task);
-        enable_interrupts();
         return e;
     }
     if((e=exec(task, &p, &args, &env)) < 0) {
         drop_task(task);
-        enable_interrupts();
         return e;
     }
     cur_task->image.flags &= ~(TASK_FLAG_PRESENT);
@@ -311,7 +284,6 @@ intptr_t sys_exec(const char* path, const char** argv, size_t argc, const char**
         heap_destroy(heap);
         heap = next;
     }
-    enable_interrupts();
     // TODO: thread yield
     for(;;) asm volatile("hlt");
     return 0;
@@ -319,7 +291,7 @@ intptr_t sys_exec(const char* path, const char** argv, size_t argc, const char**
 
 void sys_exit(int code) {
 #ifdef CONFIG_LOG_SYSCALLS
-    strace("sys_exec(%d)", code);
+    strace("sys_exit(%d)", code);
 #endif
     Process* cur_proc = current_process();
     Task* cur_task = current_task();
@@ -343,6 +315,7 @@ void sys_exit(int code) {
     }
     kwarn("Hey. We couldn't find ourselves in the children list of the parent process. This is odd");
 end:
+    list_remove(&cur_task->list);
     enable_interrupts();
     // TODO: thread yield
     for(;;) asm volatile("hlt");
@@ -547,8 +520,7 @@ intptr_t sys_truncate(uintptr_t handle, size_t size) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, handle);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    return inode_truncate(res->as.inode.inode, size);
+    return inode_truncate(res->inode, size);
 }
 // TODO: strace
 intptr_t sys_epoll_create1(int flags) {
@@ -558,8 +530,11 @@ intptr_t sys_epoll_create1(int flags) {
     Process* current = current_process();
     Resource* resource = resource_add(current->resources, &id);
     if(!resource) return -NOT_ENOUGH_MEM;
-    resource->kind = RESOURCE_EPOLL;
-    epoll_init(&resource->as.epoll);
+    resource->inode = (Inode*)epoll_new();
+    if(!resource->inode) {
+        resource_remove(current->resources, id);
+        return -NOT_ENOUGH_MEM;
+    }
     return id;
 }
 // TODO: strace
@@ -571,20 +546,20 @@ intptr_t sys_epoll_ctl(int epfd, int op, int fd, const struct epoll_event *event
     if(epfd < 0 || fd < 0) return -INVALID_HANDLE;
     Resource* res = resource_find_by_id(current->resources, epfd);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_EPOLL) return -INVALID_TYPE;
+    if(res->inode->kind != INODE_EPOLL) return -INVALID_TYPE;
     switch(op) {
     case EPOLL_CTL_ADD: {
         EpollFd* entry = epoll_fd_new(fd, event);
         if(!entry) return -NOT_ENOUGH_MEM;
-        intptr_t e = epoll_add(&res->as.epoll, entry);
+        intptr_t e = epoll_add((Epoll*)res->inode, entry);
         if(e < 0) epoll_fd_delete(entry);
         return e;
     } break;
     case EPOLL_CTL_MOD: {
-        return epoll_mod(&res->as.epoll, fd, event);
+        return epoll_mod((Epoll*)res->inode, fd, event);
     } break;
     case EPOLL_CTL_DEL: {
-        return epoll_del(&res->as.epoll, fd);
+        return epoll_del((Epoll*)res->inode, fd);
     } break;
     }
     return -INVALID_PATH;
@@ -595,8 +570,8 @@ intptr_t sys_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, epfd);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_EPOLL) return -INVALID_TYPE;
-    Epoll* epoll = &res->as.epoll;
+    if(res->inode->kind != INODE_EPOLL) return -INVALID_TYPE;
+    Epoll* epoll = (Epoll*)res->inode;
     if(timeout == 0) epoll_poll(epoll, current);
     else {
         size_t until = 0xFFFFFFFFFFFFFFFFL;
@@ -627,16 +602,15 @@ intptr_t sys_socket(uint32_t domain, uint32_t type, uint32_t prototype) {
     size_t id;
     Resource* res = resource_add(current->resources, &id);
     if(!res) return -NOT_ENOUGH_MEM;
-    res->as.inode.inode = new_inode();
-    if(!res->as.inode.inode) {
+    res->inode = new_inode();
+    if(!res->inode) {
         resource_remove(current->resources, id);
         return -NOT_ENOUGH_MEM;
     }
-    res->as.inode.inode->kind = INODE_MINOS_SOCKET;
-    res->kind = RESOURCE_INODE;
-    intptr_t e = family->init(res->as.inode.inode);
+    res->inode->kind = INODE_MINOS_SOCKET;
+    intptr_t e = family->init(res->inode);
     if(e < 0) {
-        idrop(res->as.inode.inode);
+        idrop(res->inode);
         resource_remove(current->resources, id);
         return e;
     }
@@ -648,18 +622,16 @@ intptr_t sys_send(uintptr_t sockfd, const void *buf, size_t len) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, sockfd);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    if(!(res->flags & FFLAGS_NONBLOCK)) block_is_writeable(current_task(), res->as.inode.inode);
-    return inode_write(res->as.inode.inode, buf, len, res->as.inode.offset);
+    if(!(res->flags & O_NOBLOCK)) block_is_writeable(current_task(), res->inode);
+    return inode_write(res->inode, buf, len, res->offset);
 }
 // TODO: strace
 intptr_t sys_recv(uintptr_t sockfd,       void *buf, size_t len) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, sockfd);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    if(!(res->flags & FFLAGS_NONBLOCK)) block_is_readable(current_task(), res->as.inode.inode);
-    return inode_read(res->as.inode.inode, buf, len, res->as.inode.offset);
+    if(!(res->flags & O_NOBLOCK)) block_is_readable(current_task(), res->inode);
+    return inode_read(res->inode, buf, len, res->offset);
 }
 
 // TODO: strace
@@ -667,22 +639,20 @@ intptr_t sys_accept(uintptr_t sockfd, struct sockaddr* addr, size_t *addrlen) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, sockfd);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
     // TODO: verify addrlen + addr
     size_t id;
     Resource* result = resource_add(current->resources, &id);
     if(!result) return -NOT_ENOUGH_MEM;
-    result->kind = RESOURCE_INODE;
-    result->as.inode.inode = new_inode();
-    if(!result->as.inode.inode) {
+    result->inode = new_inode();
+    if(!result->inode) {
         resource_remove(current->resources, id);
         return -NOT_ENOUGH_MEM;
     }
     intptr_t e;
-    if(!(res->flags & FFLAGS_NONBLOCK)) block_is_readable(current_task(), res->as.inode.inode);
-    e = inode_accept(res->as.inode.inode, result->as.inode.inode, addr, addrlen);
+    if(!(res->flags & O_NOBLOCK)) block_is_readable(current_task(), res->inode);
+    e = inode_accept(res->inode, result->inode, addr, addrlen);
     if(e < 0) {
-        idrop(result->as.inode.inode);
+        idrop(result->inode);
         resource_remove(current->resources, id);
         return e;
     }
@@ -694,22 +664,20 @@ intptr_t sys_bind(uintptr_t sockfd, struct sockaddr* addr, size_t addrlen) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, sockfd);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    return inode_bind(res->as.inode.inode, addr, addrlen);
+    return inode_bind(res->inode, addr, addrlen);
 }
 // TODO: strace
 intptr_t sys_listen(uintptr_t sockfd, size_t n) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, sockfd);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    return inode_listen(res->as.inode.inode, n);
+    return inode_listen(res->inode, n);
 }
 // TODO: strace
 intptr_t sys_connect(uintptr_t sockfd, const struct sockaddr* addr, size_t addrlen) {
     Process* current = current_process();
     Resource* res = resource_find_by_id(current->resources, sockfd);
     if(!res) return -INVALID_HANDLE;
-    if(res->kind != RESOURCE_INODE) return -INVALID_TYPE;
-    return inode_connect(res->as.inode.inode, addr, addrlen);
+    return inode_connect(res->inode, addr, addrlen);
 }
+

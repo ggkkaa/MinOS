@@ -36,7 +36,7 @@ void ttyscratch_shrink(TtyScratch* scratch) {
     scratch->data = data;
     scratch->cap = scratch->len;
 }
-static Cache* tty_cache = NULL;
+Cache* tty_cache = NULL;
 Tty* tty_new(void) {
     Tty* tty = cache_alloc(tty_cache);
     if(!tty) return NULL;
@@ -143,9 +143,9 @@ static Tty* get_init_tty() {
     }
     return NULL;
 }
-static intptr_t tty_write(Inode* file, const void* buf, size_t size, off_t offset) {
+intptr_t tty_write(Inode* file, const void* buf, size_t size, off_t offset) {
     (void)offset;
-    Tty* tty = file->priv;
+    Tty* tty = (Tty*)file;
     if(!tty->putchar) return -UNSUPPORTED;
     for(size_t i = 0; i < size; ++i) {
         tty->putchar(tty, ((uint8_t*)buf)[i]);
@@ -158,8 +158,8 @@ static void tty_putchar(Tty* tty, uint32_t code) {
 static void tty_echo(Tty* tty, uint32_t code) {
     if(tty->flags & TTY_ECHO) tty_putchar(tty, code);
 }
-static intptr_t tty_read(Inode* file, void* buf, size_t size, off_t offset) {
-    Tty* tty = file->priv;
+intptr_t tty_read(Inode* file, void* buf, size_t size, off_t offset) {
+    Tty* tty = (Tty*)file;
     if(!tty->getchar) return -UNSUPPORTED;
     if(tty->scratch.len) goto end;
     for(;;) {
@@ -195,8 +195,8 @@ end:
     ttyscratch_shrink(&tty->scratch);
     return to_copy;
 }
-static intptr_t tty_ioctl(Inode* file, Iop op, void* arg) {
-    Tty* tty = file->priv;
+intptr_t tty_ioctl(Inode* file, Iop op, void* arg) {
+    Tty* tty = (Tty*)file;
     switch(op) {
     case TTY_IOCTL_SET_FLAGS:
         tty->flags = (ttyflags_t)(uintptr_t)arg;
@@ -209,23 +209,9 @@ static intptr_t tty_ioctl(Inode* file, Iop op, void* arg) {
     }
     return 0;
 }
-static InodeOps inodeOps = {
-    .write = tty_write,
-    .read = tty_read,
-    .ioctl = tty_ioctl
-};
-static intptr_t init_inode(Device* this, Inode* inode) {
-    inode->ops = &inodeOps;
-    inode->priv = this->priv;
-    return 0;
-}
-
-Device* create_tty_device(Tty* tty) {
-    Device* device = (Device*)cache_alloc(kernel.device_cache);
-    if(!device) return NULL;
-    device->init_inode = init_inode;
-    device->priv = tty;
-    return device;
+void tty_init(Tty* tty, Cache* cache) {
+    inode_init(&tty->inode, cache);
+    tty->flags = TTY_ECHO;
 }
 void init_tty(void) {
     tty_cache = create_new_cache(sizeof(Tty), "Tty");
@@ -239,15 +225,8 @@ void init_tty(void) {
         kerror("(tty) Missing initial tty");
         return;
     }
-    Device* device = create_tty_device(tty);
-    if(!device) {
-        // FIXME: deinit the tty
-        // FIXME: cache_destory on tty_cache
-        kerror("(tty) Failed to create tty device. Not Enough Memory");
-        return;
-    }
     intptr_t e;
-    if((e=vfs_register_device("tty0", device)) < 0) {
+    if((e=vfs_register_device("tty0", &tty->inode)) < 0) {
         // FIXME: deallocate the device
         // FIXME: deinit the tty
         // FIXME: cache_destory on tty_cache

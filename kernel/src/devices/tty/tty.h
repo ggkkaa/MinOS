@@ -1,11 +1,11 @@
 #pragma once
-#include "../../vfs.h"
+#include <vfs.h>
 #include <minos/status.h>
-#include "../../serial.h"
-#include "../../string.h"
-#include "../../mem/slab.h"
-#include "../../framebuffer.h"
-#include "../../bootutils.h"
+#include <serial.h>
+#include <string.h>
+#include <mem/slab.h>
+#include <framebuffer.h>
+#include <bootutils.h>
 #include <stdint.h>
 #include <minos/tty/ttydefs.h>
 typedef struct {
@@ -39,6 +39,7 @@ static inline char ttyscratch_popfront(TtyScratch* scratch) {
 }
 typedef struct Tty Tty;
 struct Tty {
+    Inode inode;
     TtyScratch scratch;
     ttyflags_t flags;
     Mutex mutex;
@@ -48,5 +49,9 @@ struct Tty {
     intptr_t (*deinit )(Tty* device);
 };
 void init_tty(void);
+extern Cache* tty_cache;
+intptr_t tty_write(Inode* file, const void* buf, size_t size, off_t offset);
+intptr_t tty_read(Inode* file, void* buf, size_t size, off_t offset);
+intptr_t tty_ioctl(Inode* file, Iop op, void* arg);
+void tty_init(Tty* tty, Cache* cache);
 Tty* tty_new(void);
-Device* create_tty_device(Tty* tty);

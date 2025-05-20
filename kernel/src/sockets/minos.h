@@ -22,13 +22,13 @@ enum {
 struct MinOSServer {
     char addr[SOCKADDR_MINOS_PATH_MAX];
     MinOSConnectionPool pending;
-    // TODO: maybe have a RwLock thats 99% of the time read locked
-    // and only on deletion is it write locked
 };
 typedef struct {
     uint8_t* addr;
     size_t len, cap;
 } MinOSData;
+intptr_t minos_data_reserve_at_least(MinOSData* dp, size_t n);
+void minos_data_free(MinOSData* dp);
 struct MinOSClient {
     char addr[SOCKADDR_MINOS_PATH_MAX];
     atomic_bool closed, pending; 

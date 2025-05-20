@@ -25,6 +25,7 @@ typedef struct Inode {
     inodekind_t kind;
     inodeid_t id;
     void* priv;
+    struct Cache* cache; // <- The Cache the object is in
 } Inode;
 typedef uint32_t Iop;
 
@@ -61,10 +62,6 @@ struct Superblock {
     SuperblockOps* ops;
 };
 typedef struct Device Device;
-struct Device {
-    void* priv;
-    intptr_t (*init_inode)(Device* device, Inode* inode);
-};
 struct InodeOps {
     // Ops for directories
     intptr_t (*creat)(Inode* parent, const char* name, size_t namelen, oflags_t flags);
@@ -84,6 +81,7 @@ struct InodeOps {
     // General API
     void (*cleanup)(Inode* inode); 
     bool (*is_readable)(Inode* file);
+    bool (*is_hungup)(Inode* file);
     bool (*is_writeable)(Inode* file);
     intptr_t (*stat)(Inode* inode, Stats* stats);
     // TODO: unlink which will free all memory of that inode. But only the inode itself, not its children (job of caller (vfs))
@@ -107,6 +105,8 @@ intptr_t inode_connect(Inode* sock, const struct sockaddr* addr, size_t addrlen)
 intptr_t inode_stat(Inode* inode, Stats* stats);
 // By default returns true
 bool inode_is_readable(Inode* file); 
+// By default returns false 
+bool inode_is_hungup(Inode* file);
 // By default returns true
 bool inode_is_writeable(Inode* file); 
 static intptr_t inode_size(Inode* inode) {
@@ -132,7 +132,7 @@ typedef struct {
 
 void init_vfs();
 
-intptr_t vfs_register_device(const char* name, Device* device);
+intptr_t vfs_register_device(const char* name, Inode* device);
 #define MAX_INODE_NAME 128
 
 
@@ -140,6 +140,8 @@ intptr_t vfs_register_device(const char* name, Device* device);
 // NOTE: Functions for fs drivers
 // Inode* vfs_alloc_inode(Superblock* superblock);
 Inode* new_inode();
+// Initialise the inode with its default fields
+void inode_init(Inode* inode, Cache* cache);
 Inode* iget(Inode* inode);
 
 // Internal function. Destroys inode but doesn't remove it from the superblock list

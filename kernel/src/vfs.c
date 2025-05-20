@@ -8,13 +8,15 @@ struct Cache* hashpair_cache = NULL;
 #include "string.h"
 #include "debug.h"
 
+void inode_init(Inode* inode, Cache* cache) {
+    memset(inode, 0, sizeof(*inode));
+    inode->cache = cache;
+    list_init(&inode->list);
+    inode->shared = 1;
+}
 Inode* new_inode() {
     Inode* inode = cache_alloc(kernel.inode_cache);
-    if(inode) {
-        memset(inode, 0, sizeof(*inode));
-        list_init(&inode->list);
-        inode->shared = 1;
-    }
+    if(inode) inode_init(inode, kernel.inode_cache);
     return inode;
 }
 Inode* iget(Inode* inode) {
@@ -23,7 +25,7 @@ Inode* iget(Inode* inode) {
 }
 void idestroy(Inode* inode) {
     inode_cleanup(inode);
-    cache_dealloc(kernel.inode_cache, inode);
+    cache_dealloc(inode->cache, inode);
 }
 void idrop(Inode* inode) {
     debug_assert(inode->shared);
@@ -139,6 +141,10 @@ bool inode_is_readable(Inode* inode) {
     if(!inode->ops->is_readable) return true;
     return inode->ops->is_readable(inode);
 }
+bool inode_is_hungup(Inode* inode) {
+    if(!inode->ops->is_hungup) return false;
+    return inode->ops->is_hungup(inode);
+}
 bool inode_is_writeable(Inode* inode) {
     if(!inode->ops->is_writeable) return true;
     return inode->ops->is_writeable(inode);
@@ -205,7 +211,7 @@ intptr_t vfs_creat(Path* path, oflags_t flags) {
     idrop(parent);
     return 0;
 }
-intptr_t vfs_register_device(const char* name, Device* device) {
+intptr_t vfs_register_device(const char* name, Inode* device) {
     intptr_t e;
     Inode* devices;
     if((e=vfs_find_abs("/devices", &devices)) < 0) return e;

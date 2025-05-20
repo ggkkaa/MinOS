@@ -10,9 +10,10 @@ enum {
 typedef uint32_t fmode_t;
 #define PATH_MAX 4096
 enum {
-    O_CREAT    =0b1,
-    O_DIRECTORY=0b10,
-    O_TRUNC    =0b100,
+    O_CREAT     = 0b1,
+    O_DIRECTORY = 0b10,
+    O_TRUNC     = 0b100,
+    O_NOBLOCK   = 0b1000,
 };
 typedef uint32_t oflags_t;
 enum {
@@ -28,6 +29,7 @@ typedef enum {
     INODE_FILE,
     INODE_DEVICE,
     INODE_MINOS_SOCKET,
+    INODE_EPOLL,
     INODE_COUNT,
 } InodeKind;
 typedef int inodekind_t;
@@ -44,7 +46,3 @@ typedef struct {
     inodekind_t kind;
     char name[];
 } DirEntry;
-typedef uint32_t fflags_t;
-enum {
-    FFLAGS_NONBLOCK,
-};
